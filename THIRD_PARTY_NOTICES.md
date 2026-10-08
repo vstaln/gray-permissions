@@ -1,1 +1,3 @@
-# gray gray-permissions — see README.md
+# Third-party notices
+
+See `NOTICE.md`.

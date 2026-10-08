@@ -3,7 +3,7 @@ name = "gray-permissions"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Approval-gate sidecar plugin for the gray agent harness (wire v1)."
+description = "Gate gray tool calls behind permission modes and host approval prompts"
 
 [[bin]]
 name = "permissions"

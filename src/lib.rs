@@ -2,9 +2,9 @@
 //! `/permissions` command model. The sidecar binary (`src/main.rs`) and any
 //! host-side helpers must agree on these; this lib is the single definition.
 //!
-//! History: ported from gray's deleted `crates/gray-core/src/approvals.rs`
-//! (at `d81c1a7`), reshaped as a sidecar: the plugin owns policy, the host
-//! owns user I/O via `host/ask` (owned by the `gray-questions` contract).
+//! History: reshaped from gray's former `crates/gray-core/src/approvals.rs`
+//! as a sidecar: the plugin owns policy, the host owns user I/O via
+//! `host/ask` (owned by the `gray-questions` contract).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
