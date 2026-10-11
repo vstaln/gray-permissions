@@ -150,6 +150,10 @@ fn tool_before(
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("manifest") {
+        println!("{}", manifest());
+        return;
+    }
     let gate = ApprovalGate::new(&load_mode());
     let stdout = Arc::new(Mutex::new(std::io::stdout()));
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
@@ -197,6 +201,13 @@ fn main() {
         let result = match method {
             "plugin/manifest" => manifest(),
             "tool/before" => tool_before(&stdout, &pending, &counter, &gate, &params),
+            "tool/call" => {
+                let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                serde_json::json!({
+                    "content": format!("unknown tool: {name}"),
+                    "is_error": true,
+                })
+            }
             "command/run" => {
                 let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 if gray_permissions::COMMANDS.contains(&name) {
