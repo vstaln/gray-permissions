@@ -118,6 +118,7 @@ fn tool_before(
     let picked: Vec<String> = match rx.recv_timeout(ASK_TTL) {
         Ok(result) => {
             if result.get("error").and_then(|e| e.as_str()).is_some() {
+                pending.lock().expect("pending").remove(&id);
                 return serde_json::json!({"decision": "deny", "reason": "approval prompt unavailable"});
             }
             result
@@ -133,6 +134,7 @@ fn tool_before(
                 .unwrap_or_default()
         }
         Err(_) => {
+            pending.lock().expect("pending").remove(&id);
             return serde_json::json!({"decision": "deny", "reason": "approval timed out"});
         }
     };
@@ -181,10 +183,9 @@ fn main() {
                 let _ = tx.send(v.get("result").cloned().unwrap_or(serde_json::Value::Null));
                 continue;
             }
-            let Some(id) = v.get("id").and_then(|i| i.as_u64()) else {
+            if v.get("id").and_then(|i| i.as_u64()).is_none() {
                 continue;
             };
-            let _ = id;
             if work_tx.send(v).is_err() {
                 break;
             }
