@@ -198,15 +198,18 @@ fn main() {
             .get("params")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        let result = match method {
-            "plugin/manifest" => manifest(),
-            "tool/before" => tool_before(&stdout, &pending, &counter, &gate, &params),
+        let reply = match method {
+            "plugin/manifest" => serde_json::json!({ "id": id, "result": manifest() }),
+            "tool/before" => serde_json::json!({
+                "id": id,
+                "result": tool_before(&stdout, &pending, &counter, &gate, &params),
+            }),
             "tool/call" => {
                 let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                serde_json::json!({
+                serde_json::json!({ "id": id, "result": {
                     "content": format!("unknown tool: {name}"),
                     "is_error": true,
-                })
+                }})
             }
             "command/run" => {
                 let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
@@ -222,14 +225,19 @@ fn main() {
                         .unwrap_or_default();
                     let text = run_permissions_command(&gate, &argv);
                     save_mode(&gate.mode());
-                    serde_json::json!({ "text": text })
+                    serde_json::json!({ "id": id, "result": { "text": text } })
                 } else {
-                    continue;
+                    serde_json::json!({ "id": id, "error": {
+                        "code": -32601,
+                        "message": format!("command not found: {name}"),
+                    }})
                 }
             }
-            _ => continue, // unknown methods/lines are ignored
+            _ => serde_json::json!({ "id": id, "error": {
+                "code": -32601,
+                "message": format!("method not found: {method}"),
+            }}),
         };
-        let reply = serde_json::json!({ "id": id, "result": result });
         let mut o = stdout.lock().expect("stdout");
         let _ = writeln!(o, "{reply}");
         let _ = o.flush();
