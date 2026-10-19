@@ -1,6 +1,6 @@
 [package]
 name = "gray-permissions"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 license = "MIT"
 description = "Gate gray tool calls behind permission modes and host approval prompts"
