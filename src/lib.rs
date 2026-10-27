@@ -474,7 +474,9 @@ mod tests {
     fn print_flags_mark_a_headless_host() {
         let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert!(is_print_argv(&argv(&["gray", "-p", "hi"])));
-        assert!(is_print_argv(&argv(&["/x/gray", "--model", "m", "--print", "hi"])));
+        assert!(is_print_argv(&argv(&[
+            "/x/gray", "--model", "m", "--print", "hi"
+        ])));
         assert!(is_print_argv(&argv(&["gray", "--prompt=hi"])));
         assert!(is_print_argv(&argv(&["gray", "--bare", "-p", "-"])));
         assert!(!is_print_argv(&argv(&["gray"])));
