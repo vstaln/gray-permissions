@@ -354,6 +354,19 @@ pub fn verdict(mode: &str, tool: &str, args: &serde_json::Value, cwd: &Path) -> 
     }
 }
 
+/// Human name for a tool in the prompt, matching gray's tool rows:
+/// `mcp__filmcraft__render_frame` -> `filmcraft · render frame`.
+pub fn display_tool_name(tool: &str) -> String {
+    if let Some((server, name)) = tool
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .filter(|(s, n)| !s.is_empty() && !n.is_empty())
+    {
+        return format!("{server} \u{b7} {}", name.replace(['_', '-'], " "));
+    }
+    tool.to_string()
+}
+
 /// Build the `host/ask` question for an approval. Full target, no
 /// truncation: a prompt hiding the tail of a command approves something
 /// the user did not see. Mirrors the Devin CLI prompt: Allow with a
@@ -363,7 +376,7 @@ pub fn approval_question(tool: &str, label: &str, cwd: &Path) -> AskQuestion {
     AskQuestion {
         id: APPROVAL_QUESTION_ID.to_string(),
         header: "Allow?".to_string(),
-        question: format!("Allow {tool}?\n{label}"),
+        question: format!("Allow {}?\n{label}", display_tool_name(tool)),
         detail: format!("Working directory: {}", cwd.display()),
         no_other: true,
         editable: tool == "bash",
@@ -879,8 +892,19 @@ mod tests {
             &work,
         )
         .unwrap();
-        let rules = load_rules(&work);
-        assert_eq!(rules.commands, ["cargo build"]);
+        // The project file holds exactly the saved rule; the merged set
+        // also carries whatever the real user file has, so only check
+        // membership there.
+        assert_eq!(
+            read_rules(&rules_path(Scope::Project, &work)).commands,
+            ["cargo build"]
+        );
+        assert!(
+            load_rules(&work)
+                .commands
+                .iter()
+                .any(|c| c == "cargo build")
+        );
         let raw = std::fs::read_to_string(work.join(".gray/permissions.json")).unwrap();
         assert!(raw.contains("cargo build"));
     }
@@ -909,5 +933,20 @@ mod tests {
         );
         assert_eq!(gate.mode(), "full");
         assert!(run_permissions_command(&gate, &["bogus".to_string()]).contains("unknown mode"));
+    }
+
+    #[test]
+    fn mcp_tools_read_as_server_and_tool() {
+        assert_eq!(
+            display_tool_name("mcp__filmcraft__render_frame"),
+            "filmcraft \u{b7} render frame"
+        );
+        assert_eq!(display_tool_name("bash"), "bash");
+        assert_eq!(display_tool_name("mcp__broken"), "mcp__broken");
+        let q = approval_question("mcp__filmcraft__render_frame", "{}", &cwd());
+        assert!(
+            q.question
+                .starts_with("Allow filmcraft \u{b7} render frame?")
+        );
     }
 }
