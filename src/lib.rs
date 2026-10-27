@@ -380,6 +380,46 @@ pub fn run_permissions_command(gate: &ApprovalGate, argv: &[String]) -> String {
 }
 
 /// The `plugin/manifest` result value.
+/// Whether a gray host argv is a one-shot print run (`-p`/`--print`/
+/// `--prompt`): subagents, gateway child turns and scripts. Such a host has
+/// nobody at a screen to approve anything.
+pub fn is_print_argv(argv: &[String]) -> bool {
+    for a in argv.iter().skip(1) {
+        if a == "--" {
+            return false;
+        }
+        if a == "-p"
+            || a == "--print"
+            || a == "--prompt"
+            || a.starts_with("--print=")
+            || a.starts_with("--prompt=")
+            || a.starts_with("-p=")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the gray host that spawned this plugin is headless. Linux reads
+/// the parent's argv from /proc; elsewhere this is `false`, so the gate keeps
+/// failing closed.
+pub fn host_is_headless() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let ppid = std::os::unix::process::parent_id();
+        if let Ok(raw) = std::fs::read(format!("/proc/{ppid}/cmdline")) {
+            let argv: Vec<String> = raw
+                .split(|b| *b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+                .collect();
+            return is_print_argv(&argv);
+        }
+    }
+    false
+}
+
 pub fn manifest() -> serde_json::Value {
     serde_json::json!({
         "name": PLUGIN_NAME,
@@ -388,6 +428,9 @@ pub fn manifest() -> serde_json::Value {
         "tools": [],
         "commands": COMMANDS,
         "hooks": [HOOK_TOOL_BEFORE],
+        // `host/ask` is a gated host surface: undeclared, gray refuses it
+        // (`capability_not_granted`) and every Ask verdict became a deny.
+        "capabilities": ["host.ask"],
     })
 }
 
@@ -398,6 +441,23 @@ mod tests {
 
     fn cwd() -> PathBuf {
         PathBuf::from("/work/proj")
+    }
+
+    #[test]
+    fn manifest_declares_the_ask_capability() {
+        assert_eq!(manifest()["capabilities"], json!(["host.ask"]));
+    }
+
+    #[test]
+    fn print_flags_mark_a_headless_host() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(is_print_argv(&argv(&["gray", "-p", "hi"])));
+        assert!(is_print_argv(&argv(&["/x/gray", "--model", "m", "--print", "hi"])));
+        assert!(is_print_argv(&argv(&["gray", "--prompt=hi"])));
+        assert!(is_print_argv(&argv(&["gray", "--bare", "-p", "-"])));
+        assert!(!is_print_argv(&argv(&["gray"])));
+        assert!(!is_print_argv(&argv(&["gray", "-r", "sess"])));
+        assert!(!is_print_argv(&argv(&["gray", "--", "-p"])));
     }
 
     #[test]

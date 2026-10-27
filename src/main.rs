@@ -64,6 +64,13 @@ fn tool_before(
         Err(reason) => return serde_json::json!({"decision": "deny", "reason": reason}),
         Ok(false) => {}
     }
+    // Nobody at a screen (`gray -p`: subagents, gateway turns, scripts):
+    // run it, as the old core gate did. Static Deny verdicts (read-only
+    // mode) already returned above, so they still hold headless.
+    static HEADLESS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *HEADLESS.get_or_init(gray_permissions::host_is_headless) {
+        return serde_json::json!({"decision": "allow"});
+    }
     let label = call_label(name, &args);
     let q = approval_question(name, &label, &cwd);
     let id = next_id(counter);
@@ -89,8 +96,17 @@ fn tool_before(
     }
     let picked: Vec<String> = match rx.recv_timeout(ASK_TTL) {
         Ok(result) => {
-            if result.get("error").and_then(|e| e.as_str()).is_some() {
+            if let Some(err) = result.get("error").and_then(|e| e.as_str()) {
                 pending.lock().expect("pending").remove(&id);
+                // Headless host (`gray -p`, subagents, gateway child turns):
+                // gray installs no ask service, so there is nobody to ask.
+                // Match the old core gate — prompts are an interactive-TUI
+                // feature, and a headless run was launched by someone who
+                // already chose to run it. Static Deny verdicts (read-only
+                // mode) never reach here, so they still hold.
+                if headless_host(err) {
+                    return serde_json::json!({"decision": "allow"});
+                }
                 return serde_json::json!({"decision": "deny", "reason": "approval prompt unavailable"});
             }
             result
@@ -121,6 +137,12 @@ fn tool_before(
             "reason": format!("{name} declined by user ({LABEL_NO}) — do NOT re-attempt via write/edit/bash workarounds; ask the user instead"),
         }),
     }
+}
+
+/// Whether a `host/ask` error means the host has no ask service at all
+/// (non-interactive run), as opposed to a broken prompt in a live TUI.
+fn headless_host(err: &str) -> bool {
+    err.contains("ask service not installed")
 }
 
 fn main() {

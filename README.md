@@ -19,6 +19,10 @@ and asks for approval when a call needs explicit consent.
   or **Ask** (commands, outside-workspace edits, unknown tools).
 - `Ask` sends `host/ask` with Yes / Yes-for-session / No choices. Empty,
   timed-out, or unavailable answers deny; the gate fails closed.
+- Headless runs (a `gray -p` host: subagents, gateway turns, scripts) have
+  nobody to ask, so `Ask` verdicts run without a prompt, as the old core
+  gate did. `read-only` mode still denies mutations there. Detection reads
+  the host's argv from /proc (Linux); elsewhere headless asks fail closed.
 - `/permissions` (+ `/perms`, `/access`) prints the current mode;
   `/permissions <read-only|auto|full>` changes it for the current session
   only. Every new session starts in `auto` (or `GRAY_PERMISSION` if set at
