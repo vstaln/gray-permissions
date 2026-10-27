@@ -80,12 +80,7 @@ fn tool_before(
         "id": id,
         "method": "host/ask",
         "params": {
-            "questions": [{
-                "id": q.id,
-                "header": q.header,
-                "question": q.question,
-                "options": q.options,
-            }],
+            "questions": [q],
             "blocking": true,
         },
     });

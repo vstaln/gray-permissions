@@ -109,6 +109,11 @@ fn read_allows_and_read_only_shape_without_asking() {
     assert_eq!(ask["method"], "host/ask");
     let ask_id = ask["id"].as_str().unwrap().to_string();
     assert_eq!(ask["params"]["blocking"], true);
+    // The host draws the subject whole, the cwd dim, and no "Other" row.
+    let q = &ask["params"]["questions"][0];
+    assert_eq!(q["question"], "Allow mystery?\n{}");
+    assert_eq!(q["detail"], "Working directory: /tmp");
+    assert_eq!(q["no_other"], true);
     h.send(&serde_json::json!({
         "id": ask_id,
         "result": {"answers": {"tool-approval": {"answers": ["No"]}}}

@@ -47,8 +47,16 @@ pub enum Decision {
 pub struct AskQuestion {
     pub id: String,
     pub header: String,
+    /// "Allow {tool}?" then the whole command or path on the next lines.
     pub question: String,
+    /// Dim context under the subject (the working directory).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
     pub options: Vec<AskOption>,
+    /// The answer is exactly one of the options: the host adds no free-form
+    /// "Other" row.
+    #[serde(default)]
+    pub no_other: bool,
 }
 
 /// One option row sent to `host/ask` for an approval.
@@ -61,7 +69,7 @@ pub struct AskOption {
 /// Exact labels rendered above (display text is untrusted input:
 /// substring matching once escalated any note containing "always" into
 /// session-wide memory — kept from the original).
-pub const LABEL_ONCE: &str = "Yes (Recommended)";
+pub const LABEL_ONCE: &str = "Yes";
 pub const LABEL_SESSION: &str = "Yes, for session";
 pub const LABEL_NO: &str = "No";
 
@@ -311,10 +319,9 @@ pub fn approval_question(tool: &str, label: &str, cwd: &Path) -> AskQuestion {
     AskQuestion {
         id: APPROVAL_QUESTION_ID.to_string(),
         header: "Allow?".to_string(),
-        question: format!(
-            "Allow {tool}?\n{label}\nWorking directory: {}",
-            cwd.display()
-        ),
+        question: format!("Allow {tool}?\n{label}"),
+        detail: format!("Working directory: {}", cwd.display()),
+        no_other: true,
         options: vec![
             AskOption {
                 label: LABEL_ONCE.to_string(),
@@ -441,6 +448,21 @@ mod tests {
 
     fn cwd() -> PathBuf {
         PathBuf::from("/work/proj")
+    }
+
+    #[test]
+    fn approval_question_is_subject_first_with_no_free_form_row() {
+        let q = serde_json::to_value(approval_question("bash", "echo hi\nls", &cwd())).unwrap();
+        assert_eq!(q["question"], "Allow bash?\necho hi\nls");
+        assert_eq!(q["detail"], "Working directory: /work/proj");
+        assert_eq!(q["no_other"], true);
+        let labels: Vec<&str> = q["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(labels, ["Yes", "Yes, for session", "No"]);
     }
 
     #[test]
