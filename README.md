@@ -20,8 +20,9 @@ and asks for approval when a call needs explicit consent.
 - `Ask` sends `host/ask` with Yes / Yes-for-session / No choices. Empty,
   timed-out, or unavailable answers deny; the gate fails closed.
 - `/permissions` (+ `/perms`, `/access`) prints the current mode;
-  `/permissions <read-only|auto|full>` changes it and persists the choice to
-  `$GRAY_HOME/permissions-mode.json` (seeded from `GRAY_PERMISSION`).
+  `/permissions <read-only|auto|full>` changes it for the current session
+  only. Every new session starts in `auto` (or `GRAY_PERMISSION` if set at
+  launch) and asks again; nothing is persisted.
 - Modes: `auto` asks when needed, `full` runs without prompts, and
   `read-only` denies mutations. Unknown mode strings fall back to `auto`.
 

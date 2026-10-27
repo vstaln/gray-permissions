@@ -3,9 +3,10 @@
 //! Asking goes through `host/ask` (same contract as `gray-questions`):
 //! empty/timeout answers deny (fail closed).
 //!
-//! Mode persistence: `$GRAY_HOME/permissions-mode.json`, seeded from
-//! `GRAY_PERMISSION`/`GRAY_PERMISSIONS` when no file exists. Session
-//! memory is in-process (a respawned child starts unremembered).
+//! Mode and approvals are session-scoped on purpose: every session starts
+//! in `auto` (or the `GRAY_PERMISSION`/`GRAY_PERMISSIONS` launch env) and
+//! asks again. `/permissions full` lasts until the session ends; nothing
+//! is written to disk, so no past choice silently skips a future prompt.
 
 use gray_permissions::{
     APPROVAL_QUESTION_ID, ApprovalGate, Decision, LABEL_NO, approval_question, call_label,
@@ -23,25 +24,7 @@ const ASK_TTL: Duration = Duration::from_secs(300);
 
 type Pending = Arc<Mutex<HashMap<String, mpsc::Sender<serde_json::Value>>>>;
 
-fn gray_home() -> Option<PathBuf> {
-    std::env::var_os("GRAY_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".gray")))
-}
-
-fn mode_path() -> Option<PathBuf> {
-    gray_home().map(|h| h.join("permissions-mode.json"))
-}
-
 fn load_mode() -> String {
-    if let Some(path) = mode_path()
-        && let Ok(raw) = std::fs::read_to_string(&path)
-        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
-        && let Some(mode) = v.get("mode").and_then(|m| m.as_str())
-        && gray_permissions::normalize_mode(mode).is_some()
-    {
-        return mode.to_string();
-    }
     for key in ["GRAY_PERMISSION", "GRAY_PERMISSIONS"] {
         if let Ok(v) = std::env::var(key)
             && !v.trim().is_empty()
@@ -50,17 +33,6 @@ fn load_mode() -> String {
         }
     }
     gray_permissions::MODE_AUTO.to_string()
-}
-
-fn save_mode(mode: &str) {
-    let Some(path) = mode_path() else { return };
-    if path
-        .parent()
-        .is_some_and(|p| std::fs::create_dir_all(p).is_err())
-    {
-        return;
-    }
-    let _ = std::fs::write(&path, format!("{{\"mode\":{mode:?}}}\n"));
 }
 
 fn next_id(counter: &Arc<Mutex<u64>>) -> String {
@@ -225,7 +197,6 @@ fn main() {
                         })
                         .unwrap_or_default();
                     let text = run_permissions_command(&gate, &argv);
-                    save_mode(&gate.mode());
                     serde_json::json!({ "id": id, "result": { "text": text } })
                 } else {
                     serde_json::json!({ "id": id, "error": {
