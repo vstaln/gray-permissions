@@ -2,6 +2,12 @@
 //! `/permissions` command model. The sidecar binary (`src/main.rs`) and any
 //! host-side helpers must agree on these; this lib is the single definition.
 //!
+//! The prompt mirrors Devin CLI: Allow (Once / Session / Project / Always
+//! scope slider), Bypass mode, Deny. Deny and Esc cancel the turn via the
+//! `cancel` verdict; `e` edits the command and ships it back as `modify`.
+//! Project rules persist to `<cwd>/.gray/permissions.json`, Always rules to
+//! `~/.gray/permissions.json`.
+//!
 //! History: reshaped from gray's former `crates/gray-core/src/approvals.rs`
 //! as a sidecar: the plugin owns policy, the host owns user I/O via
 //! `host/ask` (owned by the `gray-questions` contract).
@@ -33,13 +39,35 @@ pub enum Verdict {
     Ask,
 }
 
-/// User decision on an asked call (codex decision subset).
+/// Where a picked scope persists its rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Decision {
-    Accept,
-    AcceptForSession,
-    Decline,
-    Cancel,
+pub enum Scope {
+    /// `<cwd>/.gray/permissions.json`
+    Project,
+    /// `~/.gray/permissions.json`
+    User,
+}
+
+/// User decision on an asked call (Devin-CLI parity).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// Allow, scope Once.
+    Allow,
+    /// Allow + remember for the session.
+    AllowSession,
+    /// Allow + persist a rule to the project file.
+    AllowProject,
+    /// Allow + persist a rule to the user file.
+    AllowAlways,
+    /// Switch the mode to `full` and allow.
+    Bypass,
+    /// `e`-edited subject: run the tool with modified args.
+    Edit(String),
+    /// A typed note: deny the call with the note as the reason; the turn
+    /// continues so the model can adapt.
+    DenyWith(String),
+    /// Deny row, Esc, or no answer: cancel the whole turn.
+    Reject,
 }
 
 /// One question row sent to `host/ask` for an approval.
@@ -57,6 +85,9 @@ pub struct AskQuestion {
     /// "Other" row.
     #[serde(default)]
     pub no_other: bool,
+    /// `e` opens the subject for editing before confirm.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub editable: bool,
 }
 
 /// One option row sent to `host/ask` for an approval.
@@ -64,14 +95,21 @@ pub struct AskQuestion {
 pub struct AskOption {
     pub label: String,
     pub description: String,
+    /// Scope slider values cycled with left/right ("Once", "Session", ...).
+    /// The picked one ships in the answers as `scope: <label>`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
 }
 
 /// Exact labels rendered above (display text is untrusted input:
 /// substring matching once escalated any note containing "always" into
 /// session-wide memory — kept from the original).
-pub const LABEL_ONCE: &str = "Yes";
-pub const LABEL_SESSION: &str = "Yes, for session";
-pub const LABEL_NO: &str = "No";
+pub const LABEL_ALLOW: &str = "Allow";
+pub const LABEL_BYPASS: &str = "Bypass mode";
+pub const LABEL_DENY: &str = "Deny";
+
+/// Scope slider values on the Allow row, in cycle order (Devin parity).
+pub const SCOPES: &[&str] = &["Once", "Session", "Project", "Always"];
 
 pub const APPROVAL_QUESTION_ID: &str = "tool-approval";
 
@@ -155,6 +193,10 @@ impl ApprovalGate {
             Verdict::Allow => Ok(true),
             Verdict::Deny(msg) => Err(msg.to_string()),
             Verdict::Ask => {
+                let rules = load_rules(cwd);
+                if rules.allow(tool, args, cwd) {
+                    return Ok(true);
+                }
                 if (tool == "write" || tool == "edit")
                     && let Some(p) = tool_path(args)
                 {
@@ -314,7 +356,9 @@ pub fn verdict(mode: &str, tool: &str, args: &serde_json::Value, cwd: &Path) -> 
 
 /// Build the `host/ask` question for an approval. Full target, no
 /// truncation: a prompt hiding the tail of a command approves something
-/// the user did not see.
+/// the user did not see. Mirrors the Devin CLI prompt: Allow with a
+/// Once/Session/Project/Always scope slider, Bypass mode, Deny; `e` edits
+/// the command (bash only).
 pub fn approval_question(tool: &str, label: &str, cwd: &Path) -> AskQuestion {
     AskQuestion {
         id: APPROVAL_QUESTION_ID.to_string(),
@@ -322,34 +366,66 @@ pub fn approval_question(tool: &str, label: &str, cwd: &Path) -> AskQuestion {
         question: format!("Allow {tool}?\n{label}"),
         detail: format!("Working directory: {}", cwd.display()),
         no_other: true,
+        editable: tool == "bash",
         options: vec![
             AskOption {
-                label: LABEL_ONCE.to_string(),
-                description: "Run this once.".to_string(),
+                label: LABEL_ALLOW.to_string(),
+                description: "Run it.".to_string(),
+                scopes: SCOPES.iter().map(|s| s.to_string()).collect(),
             },
             AskOption {
-                label: LABEL_SESSION.to_string(),
-                description: "Run this and remember for the rest of the session.".to_string(),
+                label: LABEL_BYPASS.to_string(),
+                description:
+                    "Run this and stop asking: every tool is allowed for the rest of the session."
+                        .to_string(),
+                scopes: Vec::new(),
             },
             AskOption {
-                label: LABEL_NO.to_string(),
-                description: "Skip it; the turn continues.".to_string(),
+                label: LABEL_DENY.to_string(),
+                description: "Reject it and stop the turn.".to_string(),
+                scopes: Vec::new(),
             },
         ],
     }
 }
 
-/// Map a `host/ask` result to a [`Decision`]. Fail-closed: anything but an
-/// explicit accept denies (Esc always cancels, like codex).
-pub fn decide_from_answers(answers: &[String]) -> Decision {
-    // Exact matches on the labels rendered above.
-    if answers.iter().any(|a| a == LABEL_SESSION) {
-        Decision::AcceptForSession
-    } else if answers.iter().any(|a| a == LABEL_ONCE) {
-        Decision::Accept
-    } else {
-        Decision::Decline
+/// Map a `host/ask` result to an [`Outcome`]. Fail-closed: anything but an
+/// explicit Allow/Bypass rejects (Esc ships empty answers, like codex —
+/// and like Devin it cancels the turn rather than answering the call).
+pub fn decide_from_answers(answers: &[String]) -> Outcome {
+    // An `e` edit wins over the highlighted row (Devin runs the edited
+    // command on enter).
+    if let Some(e) = answers.iter().find_map(|a| a.strip_prefix("edited: ")) {
+        let e = e.trim();
+        if !e.is_empty() {
+            return Outcome::Edit(e.to_string());
+        }
     }
+    // A typed note denies with that note as the reason: the model sees it
+    // and adapts, which beats silently stopping the turn.
+    if let Some(n) = answers.iter().find_map(|a| a.strip_prefix("user_note: ")) {
+        let n = n.trim();
+        if !n.is_empty() {
+            return Outcome::DenyWith(n.to_string());
+        }
+    }
+    let has = |l: &str| answers.iter().any(|a| a == l);
+    if has(LABEL_BYPASS) {
+        return Outcome::Bypass;
+    }
+    if has(LABEL_ALLOW) {
+        let scope = answers
+            .iter()
+            .find_map(|a| a.strip_prefix("scope: "))
+            .unwrap_or("Once");
+        return match scope {
+            s if s.eq_ignore_ascii_case("session") => Outcome::AllowSession,
+            s if s.eq_ignore_ascii_case("project") => Outcome::AllowProject,
+            s if s.eq_ignore_ascii_case("always") => Outcome::AllowAlways,
+            _ => Outcome::Allow,
+        };
+    }
+    Outcome::Reject
 }
 
 /// Short human label for a tool call (command or path), for the ask prompt.
@@ -441,6 +517,146 @@ pub fn manifest() -> serde_json::Value {
     })
 }
 
+/// Persisted allow rules from the Project and Always scopes. Merged view
+/// of `~/.gray/permissions.json` (user) and `<cwd>/.gray/permissions.json`
+/// (project). File format:
+/// `{ "allow": { "commands": [...], "paths": [...], "tools": [...] } }`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RuleSet {
+    /// Bash command prefixes; a call matches on equality or `rule + " "`.
+    pub commands: Vec<String>,
+    /// Resolved write/edit paths; exact match.
+    pub paths: Vec<String>,
+    /// Tool names always allowed (used for tools without a path/command).
+    pub tools: Vec<String>,
+}
+
+impl RuleSet {
+    /// Whether a persisted rule already allows this call.
+    pub fn allow(&self, tool: &str, args: &serde_json::Value, cwd: &Path) -> bool {
+        if self.tools.iter().any(|t| t == tool) {
+            return true;
+        }
+        if tool == "bash"
+            && let Some(cmd) = args.get("command").and_then(|v| v.as_str())
+        {
+            let cmd = cmd.trim();
+            return self
+                .commands
+                .iter()
+                .any(|r| cmd == r || cmd.starts_with(&format!("{r} ")));
+        }
+        if (tool == "write" || tool == "edit")
+            && let Some(p) = tool_path(args)
+        {
+            let full = resolve_in(cwd, &p);
+            return self.paths.iter().any(|r| full == Path::new(r));
+        }
+        false
+    }
+}
+
+fn rules_path(scope: Scope, cwd: &Path) -> PathBuf {
+    match scope {
+        Scope::Project => cwd.join(".gray").join("permissions.json"),
+        Scope::User => std::env::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".gray")
+            .join("permissions.json"),
+    }
+}
+
+fn read_rules(path: &Path) -> RuleSet {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return RuleSet::default();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return RuleSet::default();
+    };
+    let list = |key: &str| -> Vec<String> {
+        v.get("allow")
+            .and_then(|a| a.get(key))
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    RuleSet {
+        commands: list("commands"),
+        paths: list("paths"),
+        tools: list("tools"),
+    }
+}
+
+/// Rules visible to `cwd`: user file then project file merged.
+pub fn load_rules(cwd: &Path) -> RuleSet {
+    let mut r = read_rules(&rules_path(Scope::User, cwd));
+    let p = read_rules(&rules_path(Scope::Project, cwd));
+    r.commands.extend(p.commands);
+    r.paths.extend(p.paths);
+    r.tools.extend(p.tools);
+    r
+}
+
+fn resolve_in(cwd: &Path, p: &str) -> PathBuf {
+    if Path::new(p).is_absolute() {
+        PathBuf::from(p)
+    } else {
+        cwd.join(p)
+    }
+}
+
+/// Persist an allow rule for this call in the scope's file. Bash stores
+/// the command (prefix-matched later), write/edit the resolved path, and
+/// anything else the bare tool name. The file is re-read on every check,
+/// so the rule takes effect immediately.
+pub fn save_rule(
+    scope: Scope,
+    tool: &str,
+    args: &serde_json::Value,
+    cwd: &Path,
+) -> std::io::Result<()> {
+    let path = rules_path(scope, cwd);
+    let mut rules = read_rules(&path);
+    match tool {
+        "bash" => {
+            if let Some(c) = args.get("command").and_then(|v| v.as_str()) {
+                let c = c.trim().to_string();
+                if !c.is_empty() && !rules.commands.contains(&c) {
+                    rules.commands.push(c);
+                }
+            }
+        }
+        "write" | "edit" => {
+            if let Some(p) = tool_path(args) {
+                let full = resolve_in(cwd, &p).display().to_string();
+                if !rules.paths.contains(&full) {
+                    rules.paths.push(full);
+                }
+            }
+        }
+        _ => {
+            if !tool.is_empty() && !rules.tools.iter().any(|t| t == tool) {
+                rules.tools.push(tool.to_string());
+            }
+        }
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let out = serde_json::json!({
+        "allow": {
+            "commands": rules.commands,
+            "paths": rules.paths,
+            "tools": rules.tools,
+        }
+    });
+    std::fs::write(&path, serde_json::to_string_pretty(&out)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,18 +667,29 @@ mod tests {
     }
 
     #[test]
-    fn approval_question_is_subject_first_with_no_free_form_row() {
+    fn approval_question_matches_the_devin_prompt_shape() {
         let q = serde_json::to_value(approval_question("bash", "echo hi\nls", &cwd())).unwrap();
         assert_eq!(q["question"], "Allow bash?\necho hi\nls");
         assert_eq!(q["detail"], "Working directory: /work/proj");
         assert_eq!(q["no_other"], true);
+        assert_eq!(q["editable"], true);
         let labels: Vec<&str> = q["options"]
             .as_array()
             .unwrap()
             .iter()
             .map(|o| o["label"].as_str().unwrap())
             .collect();
-        assert_eq!(labels, ["Yes", "Yes, for session", "No"]);
+        assert_eq!(labels, ["Allow", "Bypass mode", "Deny"]);
+        let scopes: Vec<&str> = q["options"][0]["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap())
+            .collect();
+        assert_eq!(scopes, ["Once", "Session", "Project", "Always"]);
+        // Non-bash tools get no `e` editor.
+        let q = serde_json::to_value(approval_question("write", "a.rs", &cwd())).unwrap();
+        assert!(q.get("editable").is_none() || q["editable"] == false);
     }
 
     #[test]
@@ -586,18 +813,76 @@ mod tests {
     }
 
     #[test]
-    fn decide_exact_labels_only() {
+    fn decide_maps_devin_scopes_edits_and_notes() {
+        assert_eq!(decide_from_answers(&["Allow".into()]), Outcome::Allow);
         assert_eq!(
-            decide_from_answers(&[LABEL_SESSION.into()]),
-            Decision::AcceptForSession
+            decide_from_answers(&["Allow".into(), "scope: Session".into()]),
+            Outcome::AllowSession
         );
-        assert_eq!(decide_from_answers(&[LABEL_ONCE.into()]), Decision::Accept);
-        // Substring must NOT escalate (the old "always" bug class).
+        assert_eq!(
+            decide_from_answers(&["Allow".into(), "scope: Project".into()]),
+            Outcome::AllowProject
+        );
+        assert_eq!(
+            decide_from_answers(&["Allow".into(), "scope: Always".into()]),
+            Outcome::AllowAlways
+        );
+        assert_eq!(
+            decide_from_answers(&["Bypass mode".into()]),
+            Outcome::Bypass
+        );
+        assert_eq!(decide_from_answers(&["Deny".into()]), Outcome::Reject);
+        // Esc ships empty answers → reject (cancels the turn, Devin parity).
+        assert_eq!(decide_from_answers(&[]), Outcome::Reject);
+        // `e` edit wins over the highlighted row.
+        assert_eq!(
+            decide_from_answers(&["Allow".into(), "edited: git diff".into()]),
+            Outcome::Edit("git diff".into())
+        );
+        // A typed note denies with it as the reason — and still cannot
+        // escalate (the old "always" substring bug class).
         assert_eq!(
             decide_from_answers(&["user_note: always do this".into()]),
-            Decision::Decline
+            Outcome::DenyWith("always do this".into())
         );
-        assert_eq!(decide_from_answers(&[]), Decision::Decline);
+    }
+
+    #[test]
+    fn rules_match_prefixes_paths_and_tool_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().to_path_buf();
+        let rules = RuleSet {
+            commands: vec!["git status".into(), "ls".into()],
+            paths: vec![work.join("a.rs").display().to_string()],
+            tools: vec!["schedule_task".into()],
+        };
+        assert!(rules.allow("bash", &json!({"command": "git status"}), &work));
+        assert!(rules.allow("bash", &json!({"command": "git status -s"}), &work));
+        assert!(rules.allow("bash", &json!({"command": "ls -la"}), &work));
+        assert!(!rules.allow("bash", &json!({"command": "lsd"}), &work));
+        assert!(!rules.allow("bash", &json!({"command": "git push"}), &work));
+        assert!(rules.allow("write", &json!({"path": "a.rs"}), &work));
+        assert!(!rules.allow("write", &json!({"path": "b.rs"}), &work));
+        assert!(rules.allow("schedule_task", &json!({}), &work));
+        assert!(!rules.allow("bash", &json!({}), &work));
+    }
+
+    #[test]
+    fn save_rule_persists_and_load_rules_merges() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("proj");
+        std::fs::create_dir_all(&work).unwrap();
+        save_rule(
+            Scope::Project,
+            "bash",
+            &json!({"command": "cargo build"}),
+            &work,
+        )
+        .unwrap();
+        let rules = load_rules(&work);
+        assert_eq!(rules.commands, ["cargo build"]);
+        let raw = std::fs::read_to_string(work.join(".gray/permissions.json")).unwrap();
+        assert!(raw.contains("cargo build"));
     }
 
     #[test]

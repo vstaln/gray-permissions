@@ -3,14 +3,17 @@
 //! Asking goes through `host/ask` (same contract as `gray-questions`):
 //! empty/timeout answers deny (fail closed).
 //!
-//! Mode and approvals are session-scoped on purpose: every session starts
-//! in `auto` (or the `GRAY_PERMISSION`/`GRAY_PERMISSIONS` launch env) and
-//! asks again. `/permissions full` lasts until the session ends; nothing
-//! is written to disk, so no past choice silently skips a future prompt.
+//! The prompt mirrors Devin CLI: Allow (Once/Session/Project/Always scope
+//! slider), Bypass mode, Deny. Session grants are memory-only; Project and
+//! Always persist explicit allow rules to `.gray/permissions.json` in the
+//! project and the user's home. Deny and Esc cancel the whole turn via the
+//! `cancel` verdict; `e` edits a bash command and runs it as `modify`.
+//! The mode itself never persists: every session starts in `auto` (or the
+//! `GRAY_PERMISSION`/`GRAY_PERMISSIONS` launch env).
 
 use gray_permissions::{
-    APPROVAL_QUESTION_ID, ApprovalGate, Decision, LABEL_NO, approval_question, call_label,
-    decide_from_answers, manifest, run_permissions_command,
+    APPROVAL_QUESTION_ID, ApprovalGate, LABEL_DENY, MODE_FULL, Outcome, Scope, approval_question,
+    call_label, decide_from_answers, manifest, run_permissions_command, save_rule,
 };
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -122,14 +125,49 @@ fn tool_before(
         }
     };
     match decide_from_answers(&picked) {
-        Decision::Accept => serde_json::json!({"decision": "allow"}),
-        Decision::AcceptForSession => {
+        Outcome::Allow => serde_json::json!({"decision": "allow"}),
+        Outcome::AllowSession => {
             gate.remember(name, &args, &cwd);
             serde_json::json!({"decision": "allow"})
         }
-        Decision::Decline | Decision::Cancel => serde_json::json!({
+        o @ (Outcome::AllowProject | Outcome::AllowAlways) => {
+            let scope = if matches!(o, Outcome::AllowProject) {
+                Scope::Project
+            } else {
+                Scope::User
+            };
+            if let Err(e) = save_rule(scope, name, &args, &cwd) {
+                eprintln!(
+                    "permissions: could not persist rule ({e}); remembered for session instead"
+                );
+                gate.remember(name, &args, &cwd);
+            }
+            serde_json::json!({"decision": "allow"})
+        }
+        Outcome::Bypass => {
+            gate.set_mode(MODE_FULL);
+            serde_json::json!({"decision": "allow"})
+        }
+        Outcome::Edit(text) => {
+            if name != "bash" {
+                return serde_json::json!({
+                    "decision": "deny",
+                    "reason": format!("edited arguments unsupported for {name}"),
+                });
+            }
+            let mut rewritten = args.clone();
+            rewritten["command"] = serde_json::json!(text);
+            serde_json::json!({"decision": "modify", "args": rewritten})
+        }
+        Outcome::DenyWith(note) => serde_json::json!({
             "decision": "deny",
-            "reason": format!("{name} declined by user ({LABEL_NO}) — do NOT re-attempt via write/edit/bash workarounds; ask the user instead"),
+            "reason": format!("{name} declined by user: {note}"),
+        }),
+        // Deny row or Esc: stop the turn, like Devin — do NOT re-attempt
+        // via write/edit/bash workarounds.
+        Outcome::Reject => serde_json::json!({
+            "decision": "cancel",
+            "reason": format!("{name} declined by user ({LABEL_DENY}) — turn stopped"),
         }),
     }
 }

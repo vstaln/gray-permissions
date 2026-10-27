@@ -116,11 +116,11 @@ fn read_allows_and_read_only_shape_without_asking() {
     assert_eq!(q["no_other"], true);
     h.send(&serde_json::json!({
         "id": ask_id,
-        "result": {"answers": {"tool-approval": {"answers": ["No"]}}}
+        "result": {"answers": {"tool-approval": {"answers": ["Deny"]}}}
     }));
     let r = h.next_any();
     assert_eq!(r["id"], 3);
-    assert_eq!(r["result"]["decision"], "deny");
+    assert_eq!(r["result"]["decision"], "cancel");
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn session_memory_accept_once() {
     let ask_id = ask["id"].as_str().unwrap().to_string();
     h.send(&serde_json::json!({
         "id": ask_id,
-        "result": {"answers": {"tool-approval": {"answers": ["Yes, for session"]}}}
+        "result": {"answers": {"tool-approval": {"answers": ["Allow", "scope: Session"]}}}
     }));
     let r = h.next_any();
     assert_eq!(r["result"]["decision"], "allow");
@@ -150,6 +150,45 @@ fn session_memory_accept_once() {
         r,
         serde_json::json!({"id": 3, "result": {"decision": "allow"}})
     );
+}
+
+#[test]
+fn edited_command_comes_back_as_modify() {
+    let mut h = Harness::spawn();
+    h.send(&serde_json::json!({"id": 1, "method": "plugin/manifest"}));
+    let _ = h.next_any();
+    h.send(&serde_json::json!({
+        "id": 2, "method": "tool/before",
+        "params": {"name": "bash", "args": {"command": "git push"}, "session": session("/tmp")}
+    }));
+    let ask = h.next_any();
+    let ask_id = ask["id"].as_str().unwrap().to_string();
+    h.send(&serde_json::json!({
+        "id": ask_id,
+        "result": {"answers": {"tool-approval": {"answers": ["Allow", "edited: git status"]}}}
+    }));
+    let r = h.next_any();
+    assert_eq!(r["result"]["decision"], "modify");
+    assert_eq!(r["result"]["args"]["command"], "git status");
+}
+
+#[test]
+fn esc_empty_answers_cancel_the_turn() {
+    let mut h = Harness::spawn();
+    h.send(&serde_json::json!({"id": 1, "method": "plugin/manifest"}));
+    let _ = h.next_any();
+    h.send(&serde_json::json!({
+        "id": 2, "method": "tool/before",
+        "params": {"name": "bash", "args": {"command": "ls"}, "session": session("/tmp")}
+    }));
+    let ask = h.next_any();
+    let ask_id = ask["id"].as_str().unwrap().to_string();
+    h.send(&serde_json::json!({
+        "id": ask_id,
+        "result": {"answers": {}}
+    }));
+    let r = h.next_any();
+    assert_eq!(r["result"]["decision"], "cancel");
 }
 
 #[test]
