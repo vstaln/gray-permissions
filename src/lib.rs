@@ -523,6 +523,7 @@ pub fn manifest() -> serde_json::Value {
         "protocol": PROTOCOL,
         "tools": [],
         "commands": COMMANDS,
+        "command_descriptions": {"/permissions": "choose how tool calls get approved", "/perms": "choose how tool calls get approved", "/access": "choose how tool calls get approved"},
         "hooks": [HOOK_TOOL_BEFORE],
         // `host/ask` is a gated host surface: undeclared, gray refuses it
         // (`capability_not_granted`) and every Ask verdict became a deny.
