@@ -522,6 +522,7 @@ pub fn manifest() -> serde_json::Value {
         "version": env!("CARGO_PKG_VERSION"),
         "protocol": PROTOCOL,
         "tools": [],
+        "description": "choose how tool calls get approved",
         "commands": COMMANDS,
         "command_descriptions": {"/permissions": "choose how tool calls get approved", "/perms": "choose how tool calls get approved", "/access": "choose how tool calls get approved"},
         "hooks": [HOOK_TOOL_BEFORE],
