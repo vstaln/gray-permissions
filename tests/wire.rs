@@ -56,6 +56,18 @@ impl Harness {
             .expect("reply within 15s");
         serde_json::from_str(&line).expect("valid json reply")
     }
+
+    fn next_ask(&mut self) -> serde_json::Value {
+        loop {
+            let v = self.next_any();
+            if v["method"] == "host/ask" && v["params"]["blocking"] == false {
+                let id = v["id"].as_str().unwrap().to_string();
+                self.send(&serde_json::json!({"id": id, "result": {"answers": {}}}));
+                continue;
+            }
+            return v;
+        }
+    }
 }
 
 impl Drop for Harness {
@@ -105,7 +117,7 @@ fn read_allows_and_read_only_shape_without_asking() {
         "id": 3, "method": "tool/before",
         "params": {"name": "mystery", "args": {}, "session": session("/tmp")}
     }));
-    let ask = h.next_any();
+    let ask = h.next_ask();
     assert_eq!(ask["method"], "host/ask");
     let ask_id = ask["id"].as_str().unwrap().to_string();
     assert_eq!(ask["params"]["blocking"], true);
@@ -135,7 +147,7 @@ fn session_memory_accept_once() {
         })
     };
     h.send(&bash(2));
-    let ask = h.next_any();
+    let ask = h.next_ask();
     let ask_id = ask["id"].as_str().unwrap().to_string();
     h.send(&serde_json::json!({
         "id": ask_id,
@@ -161,7 +173,7 @@ fn edited_command_comes_back_as_modify() {
         "id": 2, "method": "tool/before",
         "params": {"name": "bash", "args": {"command": "git push"}, "session": session("/tmp")}
     }));
-    let ask = h.next_any();
+    let ask = h.next_ask();
     let ask_id = ask["id"].as_str().unwrap().to_string();
     h.send(&serde_json::json!({
         "id": ask_id,
@@ -181,7 +193,7 @@ fn esc_empty_answers_cancel_the_turn() {
         "id": 2, "method": "tool/before",
         "params": {"name": "bash", "args": {"command": "ls"}, "session": session("/tmp")}
     }));
-    let ask = h.next_any();
+    let ask = h.next_ask();
     let ask_id = ask["id"].as_str().unwrap().to_string();
     h.send(&serde_json::json!({
         "id": ask_id,
